@@ -2,6 +2,7 @@
 
 namespace Drupal\islandora_iiif\Plugin\views\style;
 
+use Drupal\Core\Entity\EntityManager;
 use Drupal\views\Plugin\views\style\StylePluginBase;
 use Drupal\Core\Form\FormStateInterface;
 use Drupal\Core\Messenger\MessengerInterface;
@@ -85,7 +86,7 @@ class IIIFManifest extends StylePluginBase {
   /**
    * {@inheritdoc}
    */
-  public function __construct(array $configuration, $plugin_id, $plugin_definition, SerializerInterface $serializer, Request $request, ImmutableConfig $iiif_config, FileSystemInterface $file_system, Client $http_client, MessengerInterface $messenger) {
+  public function __construct(array $configuration, $plugin_id, $plugin_definition, SerializerInterface $serializer, Request $request, ImmutableConfig $iiif_config, FileSystemInterface $file_system, Client $http_client, MessengerInterface $messenger, \Drupal\islandora\IslandoraUtils $utils) {
     parent::__construct($configuration, $plugin_id, $plugin_definition);
 
     $this->serializer = $serializer;
@@ -94,6 +95,7 @@ class IIIFManifest extends StylePluginBase {
     $this->fileSystem = $file_system;
     $this->httpClient = $http_client;
     $this->messenger = $messenger;
+    $this->utils = $utils;
   }
 
   /**
@@ -109,7 +111,8 @@ class IIIFManifest extends StylePluginBase {
       $container->get('config.factory')->get('islandora_iiif.settings'),
       $container->get('file_system'),
       $container->get('http_client'),
-      $container->get('messenger')
+      $container->get('messenger'),
+      $container->get('islandora.utils')
     );
   }
 
@@ -151,6 +154,18 @@ class IIIFManifest extends StylePluginBase {
           $json['sequences'][0]['canvases'][] = $tile_source;
         }
       }
+      if (count($this->view->result) < 1) {
+        $pathinfo = $this->request->getPathInfo();
+        $node_id_str = str_replace(['/node/', '/manifest'], '', $pathinfo);
+        if ($node_id_str) {
+          $node = \Drupal::entityTypeManager()->getStorage('node')->load($node_id_str);
+          // Get the node's media that is a "Service File" since that is what
+          // the view is restricted to.
+          $service_file_term = array_pop(\Drupal::entityTypeManager()->getStorage('taxonomy_term')->loadByProperties(['field_external_uri' => 'http://pcdm.org/use#ServiceFile', 'vid' => 'islandora_media_use']));
+          $node_media = $this->utils->getMediaWithTerm($node, $service_file_term);
+          $json['sequences'][0]['canvases'][] = $this->getTileSourceFromRow(NULL, $iiif_address, $iiif_base_id, $node_media);
+        }
+      }
     }
     unset($this->view->row_index);
 
@@ -162,22 +177,24 @@ class IIIFManifest extends StylePluginBase {
   /**
    * Render array from views result row.
    *
-   * @param \Drupal\views\ResultRow $row
-   *   Result row.
+   * @param MIXED $row
+   *   Result row \Drupal\views\ResultRow usually coming from the view - or can be NULL when overridden.
    * @param string $iiif_address
    *   The URL to the IIIF server endpoint.
    * @param string $iiif_base_id
    *   The URL for the request, minus the last part of the URL,
    *   which is likely "manifest".
+   * @param object $override_media
+   *   The "result's" media when not coming from the view results.
    *
    * @return array
    *   List of IIIF URLs to display in the Openseadragon viewer.
    */
-  protected function getTileSourceFromRow(ResultRow $row, $iiif_address, $iiif_base_id) {
+  protected function getTileSourceFromRow($row, $iiif_address, $iiif_base_id, $override_media = NULL) {
     $canvases = [];
     foreach ($this->options['iiif_tile_field'] as $iiif_tile_field) {
       $viewsField = $this->view->field[$iiif_tile_field];
-      $entity = $viewsField->getEntity($row);
+      $entity = is_null($override_media) ? $viewsField->getEntity($row) : $override_media;
 
       if (isset($entity->{$viewsField->definition['field_name']})) {
 
